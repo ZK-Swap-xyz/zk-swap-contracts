@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.16;
 
-/// @title Provides a function for deriving a pool address from the factory, tokens, and swap fee
+/// @title Provides a function for deriving a pool address from the factory, tokens, and swap fee on zksync evm
 library PoolAddress {
     bytes32 constant CREATE2_PREFIX = 0x2020dba91b30cc0006188af794c2fb30dd8520db7e2c088b7fc7c103c00ca494;
     /// @dev `keccak256("")`

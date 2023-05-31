@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: agpl-3.0
+// SPDX-License-Identifier: MIT
 pragma solidity >=0.8.0;
 
 interface IBasePositionManagerEvents {
@@ -47,4 +47,14 @@ interface IBasePositionManagerEvents {
         uint256 amount1,
         uint256 additionalRTokenOwed
     );
+
+    /// @notice Emitted when burn position's RToken
+    /// @param tokenId id of the token
+    /// @param rTokenBurn amount of position's RToken burnt
+    event BurnRToken(uint256 indexed tokenId, uint256 rTokenBurn);
+
+    /// @notice Emitted when sync fee growth
+    /// @param tokenId id of the token
+    /// @param additionalRTokenOwed additional rToken earned
+    event SyncFeeGrowth(uint256 indexed tokenId, uint256 additionalRTokenOwed);
 }

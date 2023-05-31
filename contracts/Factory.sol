@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.16;
 
-
 import {EnumerableSet} from '@openzeppelin/contracts/utils/structs/EnumerableSet.sol';
 
 import {MathConstants} from './libraries/MathConstants.sol';
@@ -15,6 +14,7 @@ contract Factory is IFactory {
 
     struct Parameters {
         address factory;
+        address poolOracle;
         address token0;
         address token1;
         uint24 swapFeeUnits;
@@ -26,6 +26,7 @@ contract Factory is IFactory {
 
     /// @inheritdoc IFactory
     bytes32 public immutable override poolInitHash;
+    address public immutable override poolOracle;
     address public override configMaster;
     bool public override whitelistDisabled;
 
@@ -50,14 +51,17 @@ contract Factory is IFactory {
         _;
     }
 
-    constructor(uint32 _vestingPeriod, bytes32 poolBytecodeHash) {
+    constructor(uint32 _vestingPeriod, address _poolOracle, bytes32 poolBytecodeHash) {
         poolInitHash = poolBytecodeHash;
 
+        require(_poolOracle != address(0), 'invalid pool oracle');
+        poolOracle = _poolOracle;
+
         vestingPeriod = _vestingPeriod;
-        //emit VestingPeriodUpdated(_vestingPeriod);
+        emit VestingPeriodUpdated(_vestingPeriod);
 
         configMaster = msg.sender;
-        //emit ConfigMasterUpdated(address(0), configMaster);
+        emit ConfigMasterUpdated(address(0), configMaster);
 
         feeAmountTickDistance[8] = 1;
         //emit SwapFeeEnabled(8, 1);
@@ -89,6 +93,7 @@ contract Factory is IFactory {
         require(getPool[token0][token1][swapFeeUnits] == address(0), 'pool exists');
 
         parameters.factory = address(this);
+        parameters.poolOracle = poolOracle;
         parameters.token0 = token0;
         parameters.token1 = token1;
         parameters.swapFeeUnits = swapFeeUnits;

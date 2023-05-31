@@ -23,19 +23,10 @@ import {IFlashCallback} from './interfaces/callback/IFlashCallback.sol';
 
 import {PoolTicksState} from './PoolTicksState.sol';
 
-contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSWAP-RT') {
+contract Pool is IPool, PoolTicksState, ERC20('ZK-Swap Reinvestment Token', 'ZKSWAP-RT') {
     using SafeCast for uint256;
     using SafeCast for int256;
     using SafeERC20 for IERC20;
-
-    /// @dev Mutually exclusive reentrancy protection into the pool from/to a method.
-    /// Also prevents entrance to pool actions prior to initalization
-    modifier lock() {
-        require(poolData.locked == false, 'locked');
-        poolData.locked = true;
-        _;
-        poolData.locked = false;
-    }
 
     constructor() {}
 
@@ -151,6 +142,8 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
             feeGrowthInsideLast
             );
         }
+        // write an oracle entry
+        poolOracle.write(_blockTimestamp(), currentTick, baseL);
         // current tick is inside the passed range
         qty0 = QtyDeltaMath.calcRequiredQty0(
             sqrtP,
@@ -311,6 +304,7 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
         bool isExactInput; // true = input qty, false = output qty
         uint128 baseL; // the cached base pool liquidity without reinvestment liquidity
         uint128 reinvestL; // the cached reinvestment liquidity
+        uint160 startSqrtP; // the start sqrt price before each iteration
     }
 
     // variables below are loaded only when crossing a tick
@@ -323,6 +317,11 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
         uint24 governmentFeeUnits; // governmentFeeUnits to be charged
         uint256 governmentFee; // qty of reinvestment token for government fee
         uint256 lpFee; // qty of reinvestment token for liquidity provider
+    }
+
+    struct OracleCache {
+        int24 currentTick;
+        uint128 baseL;
     }
 
     // @inheritdoc IPoolActions
@@ -348,6 +347,13 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
         swapData.currentTick,
         swapData.nextTick
         ) = _getInitialSwapData(willUpTick);
+
+        // cache data before swap to write into oracle if needed
+        OracleCache memory oracleCache = OracleCache({
+        currentTick: swapData.currentTick,
+        baseL: swapData.baseL
+        });
+
         // verify limitSqrtP
         if (willUpTick) {
             require(
@@ -366,6 +372,7 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
             // math calculations work with the assumption that the price diff is capped to 5%
             // since tick distance is uncapped between currentTick and nextTick
             // we use tempNextTick to satisfy our assumption with MAX_TICK_DISTANCE is set to be matched this condition
+
             int24 tempNextTick = swapData.nextTick;
             if (willUpTick && tempNextTick > C.MAX_TICK_DISTANCE + swapData.currentTick) {
                 tempNextTick = swapData.currentTick + C.MAX_TICK_DISTANCE;
@@ -373,6 +380,7 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
                 tempNextTick = swapData.currentTick - C.MAX_TICK_DISTANCE;
             }
 
+            swapData.startSqrtP = swapData.sqrtP;
             swapData.nextSqrtP = TickMath.getSqrtRatioAtTick(tempNextTick);
 
             // local scope for targetSqrtP, usedAmount, returnedAmount and deltaL
@@ -403,7 +411,10 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
 
             // if price has not reached the next sqrt price
             if (swapData.sqrtP != swapData.nextSqrtP) {
-                swapData.currentTick = TickMath.getTickAtSqrtRatio(swapData.sqrtP);
+                if (swapData.sqrtP != swapData.startSqrtP) {
+                    // update the current tick data in case the sqrtP has changed
+                    swapData.currentTick = TickMath.getTickAtSqrtRatio(swapData.sqrtP);
+                }
                 break;
             }
             swapData.currentTick = willUpTick ? tempNextTick : tempNextTick - 1;
@@ -458,6 +469,11 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
             if (cache.lpFee > 0) _mint(address(this), cache.lpFee);
             poolData.reinvestLLast = cache.reinvestLLast;
             poolData.feeGrowthGlobal = cache.feeGrowthGlobal;
+        }
+
+        // write an oracle entry if tick changed
+        if (swapData.currentTick != oracleCache.currentTick) {
+            poolOracle.write(_blockTimestamp(), oracleCache.currentTick, oracleCache.baseL);
         }
 
         _updatePoolData(
@@ -554,13 +570,51 @@ contract Pool is IPool, PoolTicksState, ERC20('ZKSwap Reinvestment Token', 'ZKSW
     {
         uint256 secondsElapsed = _blockTimestamp() - poolData.secondsPerLiquidityUpdateTime;
         // update secondsPerLiquidityGlobal and secondsPerLiquidityUpdateTime if needed
-        if (secondsElapsed > 0 && baseL > 0) {
-            _secondsPerLiquidityGlobal += uint128((secondsElapsed << C.RES_96) / baseL);
-            // write to storage
-            poolData.secondsPerLiquidityGlobal = _secondsPerLiquidityGlobal;
+        if (secondsElapsed > 0) {
             poolData.secondsPerLiquidityUpdateTime = _blockTimestamp();
+            if (baseL > 0) {
+                _secondsPerLiquidityGlobal += uint128((secondsElapsed << C.RES_96) / baseL);
+                // write to storage
+                poolData.secondsPerLiquidityGlobal = _secondsPerLiquidityGlobal;
+            }
         }
         return _secondsPerLiquidityGlobal;
+    }
+
+    function tweakPosZeroLiq(int24 tickLower, int24 tickUpper) external override lock returns (uint256 feeGrowthInsideLast) {
+        require(factory.isWhitelistedNFTManager(msg.sender), 'forbidden');
+        require(tickLower < tickUpper, 'invalid tick range');
+        require(TickMath.MIN_TICK <= tickLower, 'invalid lower tick');
+        require(tickUpper <= TickMath.MAX_TICK, 'invalid upper tick');
+        require(
+            tickLower % tickDistance == 0 && tickUpper % tickDistance == 0,
+            'tick not in distance'
+        );
+        bytes32 key = _positionKey(msg.sender, tickLower, tickUpper);
+        require(positions[key].liquidity > 0, 'invalid position');
+
+        // SLOAD variables into memory
+        uint128 baseL = poolData.baseL;
+        CumulativesData memory cumulatives;
+        cumulatives.feeGrowth = _syncFeeGrowth(baseL, poolData.reinvestL, poolData.feeGrowthGlobal, true);
+        cumulatives.secondsPerLiquidity = _syncSecondsPerLiquidity(
+            poolData.secondsPerLiquidityGlobal,
+            baseL
+        );
+
+        uint256 feesClaimable;
+        (feesClaimable, feeGrowthInsideLast) = _updatePosition(
+            UpdatePositionData({
+        owner: msg.sender,
+        tickLower: tickLower,
+        tickUpper: tickUpper,
+        tickLowerPrevious: 0,
+        tickUpperPrevious: 0,
+        liquidityDelta: 0,
+        isAddLiquidity: false
+        })
+        , poolData.currentTick, cumulatives);
+        if (feesClaimable != 0) _transfer(address(this), msg.sender, feesClaimable);
     }
 
     /// @dev sync the value of feeGrowthGlobal and the value of each reinvestment token.

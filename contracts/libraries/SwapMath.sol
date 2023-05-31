@@ -57,7 +57,7 @@ library SwapMath {
         );
 
         if (
-            (isExactInput && usedAmount >= specifiedAmount) ||
+            (isExactInput && usedAmount > specifiedAmount) ||
             (!isExactInput && usedAmount <= specifiedAmount)
         ) {
             usedAmount = specifiedAmount;
@@ -270,11 +270,10 @@ library SwapMath {
         } else {
             // if isExactInput: swap 1 -> 0, sqrtP increases, we round down
             // else swap: 0 -> 1, sqrtP decreases, we round up
+            uint256 tmp = FullMath.mulDivFloor(absDelta, C.TWO_POW_96, currentSqrtP);
             if (isExactInput) {
-                uint256 tmp = FullMath.mulDivFloor(absDelta, C.TWO_POW_96, currentSqrtP);
                 return FullMath.mulDivFloor(liquidity + tmp, currentSqrtP, liquidity + deltaL);
             } else {
-                uint256 tmp = FullMath.mulDivFloor(absDelta, C.TWO_POW_96, currentSqrtP);
                 return FullMath.mulDivCeiling(liquidity - tmp, currentSqrtP, liquidity + deltaL);
             }
         }

@@ -3,8 +3,8 @@ pragma solidity 0.8.16;
 pragma abicoder v2;
 
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import {ERC721} from '@openzeppelin/contracts/token/ERC721/ERC721.sol';
 import {IERC721} from '@openzeppelin/contracts/token/ERC721/IERC721.sol';
+import {ERC721} from '@openzeppelin/contracts/token/ERC721/ERC721.sol';
 
 import {PoolAddress} from './libraries/PoolAddress.sol';
 import {MathConstants as C} from '../libraries/MathConstants.sol';
@@ -26,7 +26,7 @@ import {ERC721Permit} from './base/ERC721Permit.sol';
 contract BasePositionManager is
 IBasePositionManager,
 Multicall,
-ERC721Permit('ZKSwap NFT Positions Manager', 'ZKSWAP-NPM', '1'),
+ERC721Permit('Zk-Swap NFT Positions Manager', 'ZPSWAP-NPM', '1'),
 LiquidityHelper
 {
     address internal immutable _tokenDescriptor;
@@ -145,7 +145,6 @@ LiquidityHelper
         IPool pool;
         uint256 feeGrowthInsideLast;
 
-        int24[2] memory ticksPrevious;
         (liquidity, amount0, amount1, feeGrowthInsideLast, pool) = _addLiquidity(
             AddLiquidityParams({
         token0: poolInfo.token0,
@@ -154,7 +153,7 @@ LiquidityHelper
         recipient: address(this),
         tickLower: pos.tickLower,
         tickUpper: pos.tickUpper,
-        ticksPrevious: ticksPrevious,
+        ticksPrevious: params.ticksPrevious,
         amount0Desired: params.amount0Desired,
         amount1Desired: params.amount1Desired,
         amount0Min: params.amount0Min,
@@ -163,17 +162,13 @@ LiquidityHelper
         );
 
         uint128 tmpLiquidity = pos.liquidity;
-        uint256 tmpFeeGrowthInsideLast = pos.feeGrowthInsideLast;
 
-        if (feeGrowthInsideLast != tmpFeeGrowthInsideLast) {
-            uint256 feeGrowthInsideDiff;
-        unchecked {
-            feeGrowthInsideDiff = feeGrowthInsideLast - tmpFeeGrowthInsideLast;
-        }
-            additionalRTokenOwed = FullMath.mulDivFloor(tmpLiquidity, feeGrowthInsideDiff, C.TWO_POW_96);
-            pos.rTokenOwed += additionalRTokenOwed;
-            pos.feeGrowthInsideLast = feeGrowthInsideLast;
-        }
+        additionalRTokenOwed = _updateRTokenOwedAndFeeGrowth(
+            params.tokenId,
+            pos.feeGrowthInsideLast,
+            feeGrowthInsideLast,
+            tmpLiquidity
+        );
 
         pos.liquidity = tmpLiquidity + liquidity;
 
@@ -194,7 +189,6 @@ LiquidityHelper
     {
         Position storage pos = _positions[params.tokenId];
         uint128 tmpLiquidity = pos.liquidity;
-        uint256 tmpFeeGrowthInsideLast = pos.feeGrowthInsideLast;
         require(tmpLiquidity >= params.liquidity, 'Insufficient liquidity');
 
         PoolInfo memory poolInfo = _poolInfoById[pos.poolId];
@@ -208,19 +202,42 @@ LiquidityHelper
         );
         require(amount0 >= params.amount0Min && amount1 >= params.amount1Min, 'Low return amounts');
 
-        if (feeGrowthInsideLast != tmpFeeGrowthInsideLast) {
-            uint256 feeGrowthInsideDiff;
-        unchecked {
-            feeGrowthInsideDiff = feeGrowthInsideLast - tmpFeeGrowthInsideLast;
-        }
-            additionalRTokenOwed = FullMath.mulDivFloor(tmpLiquidity, feeGrowthInsideDiff, C.TWO_POW_96);
-            pos.rTokenOwed += additionalRTokenOwed;
-            pos.feeGrowthInsideLast = feeGrowthInsideLast;
-        }
+        additionalRTokenOwed = _updateRTokenOwedAndFeeGrowth(
+            params.tokenId,
+            pos.feeGrowthInsideLast,
+            feeGrowthInsideLast,
+            tmpLiquidity
+        );
 
         pos.liquidity = tmpLiquidity - params.liquidity;
 
         emit RemoveLiquidity(params.tokenId, params.liquidity, amount0, amount1, additionalRTokenOwed);
+    }
+
+    function syncFeeGrowth(uint256 tokenId)
+    external
+    virtual
+    override
+    isAuthorizedForToken(tokenId)
+    returns(uint256 additionalRTokenOwed)
+    {
+        Position storage pos = _positions[tokenId];
+
+        PoolInfo memory poolInfo = _poolInfoById[pos.poolId];
+        IPool pool = _getPool(poolInfo.token0, poolInfo.token1, poolInfo.fee);
+
+        uint256 feeGrowthInsideLast = pool.tweakPosZeroLiq(
+            pos.tickLower,
+            pos.tickUpper
+        );
+
+        additionalRTokenOwed = _updateRTokenOwedAndFeeGrowth(
+            tokenId,
+            pos.feeGrowthInsideLast,
+            feeGrowthInsideLast,
+            pos.liquidity
+        );
+        emit SyncFeeGrowth(tokenId, additionalRTokenOwed);
     }
 
     function burnRTokens(BurnRTokenParams calldata params)
@@ -242,8 +259,14 @@ LiquidityHelper
         IPool pool = _getPool(poolInfo.token0, poolInfo.token1, poolInfo.fee);
 
         pos.rTokenOwed = 0;
-        (amount0, amount1) = pool.burnRTokens(rTokenQty, false);
+        uint256 rTokenBalance = IERC20(address(pool)).balanceOf(address(this));
+        (amount0, amount1) = pool.burnRTokens(
+            rTokenQty > rTokenBalance ? rTokenBalance : rTokenQty,
+            false
+        );
         require(amount0 >= params.amount0Min && amount1 >= params.amount1Min, 'Low return amounts');
+
+        emit BurnRToken(params.tokenId, rTokenQty);
     }
 
     /**
@@ -306,6 +329,25 @@ LiquidityHelper
         interfaceId == type(ERC721Permit).interfaceId ||
         interfaceId == type(IBasePositionManager).interfaceId ||
         super.supportsInterface(interfaceId);
+    }
+
+    function _updateRTokenOwedAndFeeGrowth(
+        uint256 tokenId,
+        uint256 feeGrowthOld,
+        uint256 feeGrowthNew,
+        uint128 liquidity)
+    internal
+    returns (uint256 additionalRTokenOwed)
+    {
+        if (feeGrowthNew != feeGrowthOld) {
+            uint256 feeGrowthInsideDiff;
+        unchecked {
+            feeGrowthInsideDiff = feeGrowthNew - feeGrowthOld;
+        }
+            additionalRTokenOwed = FullMath.mulDivFloor(liquidity, feeGrowthInsideDiff, C.TWO_POW_96);
+            _positions[tokenId].rTokenOwed += additionalRTokenOwed;
+            _positions[tokenId].feeGrowthInsideLast = feeGrowthNew;
+        }
     }
 
     function _storePoolInfo(
