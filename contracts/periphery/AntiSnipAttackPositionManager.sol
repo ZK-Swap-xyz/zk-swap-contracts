@@ -49,7 +49,6 @@ contract AntiSnipAttackPositionManager is BasePositionManager {
         IPool pool;
         uint256 feeGrowthInsideLast;
 
-        int24[2] memory ticksPrevious;
         (liquidity, amount0, amount1, feeGrowthInsideLast, pool) = _addLiquidity(
             AddLiquidityParams({
         token0: poolInfo.token0,
@@ -58,7 +57,7 @@ contract AntiSnipAttackPositionManager is BasePositionManager {
         recipient: address(this),
         tickLower: pos.tickLower,
         tickUpper: pos.tickUpper,
-        ticksPrevious: ticksPrevious,
+        ticksPrevious: params.ticksPrevious,
         amount0Desired: params.amount0Desired,
         amount1Desired: params.amount1Desired,
         amount0Min: params.amount0Min,
@@ -141,5 +140,43 @@ contract AntiSnipAttackPositionManager is BasePositionManager {
         pos.liquidity = tmpLiquidity - params.liquidity;
 
         emit RemoveLiquidity(params.tokenId, params.liquidity, amount0, amount1, additionalRTokenOwed);
+    }
+
+    function syncFeeGrowth(uint256 tokenId)
+    external
+    override
+    isAuthorizedForToken(tokenId)
+    returns(uint256 additionalRTokenOwed)
+    {
+        Position storage pos = _positions[tokenId];
+
+        PoolInfo memory poolInfo = _poolInfoById[pos.poolId];
+        IPool pool = _getPool(poolInfo.token0, poolInfo.token1, poolInfo.fee);
+
+        uint256 feeGrowthInsideLast = pool.tweakPosZeroLiq(
+            pos.tickLower,
+            pos.tickUpper
+        );
+
+        uint256 feeGrowthInsideDiff;
+
+        unchecked {
+            feeGrowthInsideDiff = feeGrowthInsideLast - pos.feeGrowthInsideLast;
+        }
+
+        uint128 tmpLiquidity = pos.liquidity;
+        (additionalRTokenOwed, ) = AntiSnipAttack.update(
+            antiSnipAttackData[tokenId],
+            tmpLiquidity,
+            0,
+            block.timestamp.toUint32(),
+            false,
+            FullMath.mulDivFloor(tmpLiquidity, feeGrowthInsideDiff, C.TWO_POW_96),
+            IFactory(factory).vestingPeriod()
+        );
+        pos.rTokenOwed += additionalRTokenOwed;
+        pos.feeGrowthInsideLast = feeGrowthInsideLast;
+
+        emit SyncFeeGrowth(tokenId, additionalRTokenOwed);
     }
 }

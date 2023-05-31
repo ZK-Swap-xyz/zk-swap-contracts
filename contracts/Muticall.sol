@@ -1,13 +1,4 @@
-/**
- *Submitted for verification at Etherscan.io on 2021-04-29
-*/
-
-/**
- *Submitted for verification at Etherscan.io on 2021-03-23
-*/
-
 pragma solidity 0.8.16;
-pragma abicoder v2;
 
 /// @title Multicall2 - Aggregate results from multiple read-only function calls
 /// @author Michael Elliot <mike@makerdao.com>
